@@ -3,3 +3,9 @@ __pycache__/
 .venv_new/
 .pytest_cache/
 .DS_Store
+
+# Secrets — never commit a real API key.
+.env
+
+# Runtime logs and traces are generated artifacts.
+logs/
