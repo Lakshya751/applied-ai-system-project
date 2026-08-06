@@ -1,0 +1,69 @@
+%% PawPal+ — Applied AI System Architecture
+%% Source of truth for the architecture image in assets/architecture.png
+%% Preview/export: https://mermaid.live
+
+flowchart TD
+
+    subgraph UI["Presentation Layer — Streamlit (app.py)"]
+        A1["Owner / Pet / Task input forms"]
+        A2["Today's schedule table + filters"]
+        A3["AI assistant panel<br/>natural-language request"]
+        A4["Plan explanation + conflict warnings"]
+    end
+
+    subgraph STATE["Application Memory"]
+        S1["st.session_state<br/>Owner object survives reruns"]
+    end
+
+    subgraph AI["AI Layer"]
+        P1["Prompt Builder<br/>system prompt + serialized schedule"]
+        P2["Claude API Client<br/>Anthropic Messages API"]
+        P3["Response Parser / Validator<br/>structured output to Task objects"]
+        P4["Fallback Handler<br/>rule-based plan if API fails"]
+    end
+
+    subgraph LOGIC["Logic Layer — pawpal_system.py"]
+        L1["Scheduler<br/>sort_by_time, filter_by_pet,<br/>filter_by_status, detect_conflicts"]
+        L2["Owner"]
+        L3["Pet"]
+        L4["Task<br/>mark_complete, next_occurrence"]
+    end
+
+    subgraph TEST["Verification — tests/"]
+        T1["pytest suite<br/>logic + AI output validation"]
+    end
+
+    A1 --> S1
+    A3 --> P1
+    S1 --> L2
+    S1 --> L1
+
+    L2 --> L3
+    L3 --> L4
+    L1 --> L2
+
+    L1 --> P1
+    P1 --> P2
+    P2 --> P3
+    P2 -.->|API error / timeout| P4
+    P3 -->|validated tasks| L1
+    P4 --> L1
+
+    L1 --> A2
+    P3 --> A4
+    L1 --> A4
+
+    L1 -.-> T1
+    P3 -.-> T1
+
+    classDef ui fill:#e3f2fd,stroke:#1565c0,color:#0d223a
+    classDef ai fill:#f3e5f5,stroke:#6a1b9a,color:#2a0d33
+    classDef logic fill:#e8f5e9,stroke:#2e7d32,color:#0f2a14
+    classDef state fill:#fff8e1,stroke:#f9a825,color:#3a2c05
+    classDef test fill:#fbe9e7,stroke:#c62828,color:#3a0f0d
+
+    class A1,A2,A3,A4 ui
+    class P1,P2,P3,P4 ai
+    class L1,L2,L3,L4 logic
+    class S1 state
+    class T1 test
