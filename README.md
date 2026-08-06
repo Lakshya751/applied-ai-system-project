@@ -1,169 +1,393 @@
-# PawPal+ (Module 2 Project)
+# PawPal+ — A Grounded, Self-Checking Pet-Care Planning Agent
 
-You are building **PawPal+**, a Streamlit app that helps a pet owner plan care tasks for their pet.
+PawPal+ turns a sentence like *"Biscuit is a 9-month-old puppy and I work 9 to 5"* into a
+concrete daily care schedule — grounded in a local pet-care knowledge base, validated
+against the rules of the existing scheduler, repaired by the model when it gets those rules
+wrong, and held for human approval before anything is committed.
 
-## Scenario
+The interesting part is not that it calls a language model. It is what happens to the
+model's output afterwards: **every plan is treated as untrusted input** and has to survive
+a validator before a person is even shown the Approve button.
 
-A busy pet owner needs help staying consistent with pet care. They want an assistant that can:
+---
 
-- Track pet care tasks (walks, feeding, meds, enrichment, grooming, etc.)
-- Consider constraints (time available, priority, owner preferences)
-- Produce a daily plan and explain why it chose that plan
+## The base project this evolves
 
-Your job is to design the system first (UML), then implement the logic in Python, then connect it to the Streamlit UI.
+**Original project: PawPal+ (Modules 1–3).** A Streamlit pet-care planner built around four
+classes — `Owner` → `Pet` → `Task`, with a `Scheduler` holding all cross-pet logic. It let
+an owner add pets, schedule care tasks at fixed times, and view a day sorted
+chronologically with per-pet and per-status filters. Its "smart" behaviour was
+deterministic: time sorting, filtering, daily/weekly recurrence, and warnings when two
+tasks were booked at the same minute.
 
-## What you will build
+Everything above still runs, unchanged. [`pawpal_system.py`](pawpal_system.py) was not
+modified for this project — the AI layer sits on top of it and feeds it validated `Task`
+objects through the same `Pet.add_task()` the UI has always used.
 
-Your final app should:
+**What Module 4 adds:** retrieval-augmented generation over a pet-care corpus, an agentic
+plan → validate → repair loop, a provider-agnostic model client with an offline fallback,
+confidence scoring, structured run traces, and an evaluation harness.
 
-- Let a user enter basic owner + pet info
-- Let a user add/edit tasks (duration + priority at minimum)
-- Generate a daily schedule/plan based on constraints and priorities
-- Display the plan clearly (and ideally explain the reasoning)
-- Include tests for the most important scheduling behaviors
+---
 
-## Getting started
+## Architecture
 
-### Setup
+Source: [`diagrams/architecture.mmd`](diagrams/architecture.mmd)
+
+```mermaid
+flowchart TD
+    subgraph IN["Interfaces"]
+        UI["Streamlit UI<br/>app.py"]
+        CLI["CLI demo<br/>demo_ai.py"]
+    end
+
+    REQ["Owner request<br/>natural language + pet context"]
+
+    subgraph AGENT["Agent — pawpal_ai/agent.py"]
+        RET["1. RETRIEVE"]
+        PLAN["2. PLAN"]
+        VAL["3. VALIDATE<br/>schema, pets, times, conflicts, citations"]
+        REPAIR["4. REPAIR"]
+        CONF["5. SCORE CONFIDENCE"]
+    end
+
+    subgraph KB["Retrieval"]
+        DOCS[("knowledge_base/<br/>5 docs, 31 passages")]
+        INDEX["TF-IDF index<br/>stemming + domain gate"]
+    end
+
+    subgraph MODEL["Providers"]
+        GEM["GeminiProvider<br/>REST, retries, typed errors"]
+        STUB["StubProvider<br/>offline fallback"]
+    end
+
+    GATE{"HUMAN APPROVAL"}
+
+    subgraph LOGIC["Logic layer — pawpal_system.py"]
+        SCHED["Scheduler"]
+        OWN["Owner → Pet → Task"]
+    end
+
+    UI --> REQ
+    CLI --> REQ
+    REQ --> RET
+    DOCS --> INDEX
+    INDEX -->|top-k + citations| RET
+    INDEX -.->|nothing relevant| REFUSE["Refuse rather than improvise"]
+    RET --> PLAN
+    PLAN --> GEM
+    GEM -->|"error, timeout, 429"| STUB
+    GEM -->|JSON| VAL
+    STUB -->|JSON| VAL
+    VAL -->|invalid| REPAIR
+    REPAIR -->|corrected prompt| PLAN
+    VAL -->|valid| CONF
+    CONF --> GATE
+    SCHED -->|existing times| VAL
+    GATE -->|approved| OWN
+    GATE -->|discarded| REQ
+    OWN --> SCHED
+    SCHED --> UI
+```
+
+Read it as one loop. A request is **grounded** before it is answered, **checked** after it
+is answered, **repaired** if the check fails, and **gated** behind a human before it can
+change anything.
+
+Four components carry the weight:
+
+**Retriever** ([`pawpal_ai/retriever.py`](pawpal_ai/retriever.py)) — splits the corpus on
+Markdown `##` headings, indexes it with TF-IDF, and returns the top 3 passages with
+citation labels. If fewer than half the query's words appear in the corpus at all, it
+returns nothing, and the agent says so instead of guessing.
+
+**Providers** ([`pawpal_ai/providers.py`](pawpal_ai/providers.py)) — the agent talks to an
+`LLMProvider` interface, never a vendor SDK. `GeminiProvider` calls the REST endpoint with
+bounded retries and typed errors. `StubProvider` is a deterministic offline planner that
+doubles as the fallback, so the degraded path is exercised on every test run.
+
+**Validator** ([`pawpal_ai/schemas.py`](pawpal_ai/schemas.py)) — the guardrail. Checks pets
+against the real roster, enforces zero-padded `HH:MM`, rejects citations that were never
+retrieved, and detects conflicts against both the live schedule and the plan's own tasks.
+
+**Agent** ([`pawpal_ai/agent.py`](pawpal_ai/agent.py)) — runs the loop and records every
+step to a trace. `plan()` returns a proposal; `commit()` applies it. Those are separate on
+purpose.
+
+---
+
+## Setup
+
+Requires **Python 3.9+**. No paid account is needed — the Gemini free tier requires no
+credit card, and the system runs offline without any key at all.
 
 ```bash
-python -m venv .venv
-source .venv/bin/activate  # Windows: .venv\Scripts\activate
+git clone https://github.com/Lakshya751/applied-ai-system-project.git
+cd applied-ai-system-project
+
+python3 -m venv .venv
+source .venv/bin/activate          # Windows: .venv\Scripts\activate
 pip install -r requirements.txt
 ```
 
-### Suggested workflow
-
-1. Read the scenario carefully and identify requirements and edge cases.
-2. Draft a UML diagram (classes, attributes, methods, relationships).
-3. Convert UML into Python class stubs (no logic yet).
-4. Implement scheduling logic in small increments.
-5. Add tests to verify key behaviors.
-6. Connect your logic to the Streamlit UI in `app.py`.
-7. Refine UML so it matches what you actually built.
-
-## 🖥️ Sample Output
-
-Running the CLI demo (`python main.py`) produces:
-
-```
-Owner: Jordan — 2 pets
-
-Today's Schedule:
-  08:00  Morning walk (Biscuit) [daily] [todo]
-  18:00  Dinner (Biscuit) [daily] [todo]
-  09:30  Refill water (Mochi) [daily] [todo]
-```
-
-## 🧪 Testing PawPal+
-
-Run the suite from the project root:
+**Add a model (optional but recommended).** Get a free key at
+[aistudio.google.com](https://aistudio.google.com) — no credit card:
 
 ```bash
-python -m pytest
+cp .env.example .env
+# paste your key into GEMINI_API_KEY=
 ```
 
-The tests in `tests/test_pawpal.py` cover:
+**Verify the install before relying on it:**
 
-- **Core behavior** — `mark_complete()` flips status; adding a task grows a pet's
-  task list; `Owner.all_tasks()` spans every pet.
-- **Sorting** — `sort_by_time()` returns tasks chronologically regardless of insertion order.
-- **Filtering** — by pet name and by completion status.
-- **Recurrence** — completing a daily task creates a next-day occurrence attached to the
-  same pet; weekly recurs 7 days out; one-off tasks do not recur.
-- **Conflict detection** — two tasks at the same time (even across pets) produce a warning; distinct times do not.
-- **Edge cases** — a pet with no tasks yields an empty, error-free schedule.
-
-Sample run:
-
-```
-============================= test session starts ==============================
-platform darwin -- Python 3.9.6, pytest-8.4.2, pluggy-1.6.0
-configfile: pytest.ini
-testpaths: tests
-collected 12 items
-
-tests/test_pawpal.py ............                                        [100%]
-
-============================== 12 passed in 0.02s ==============================
+```bash
+python check_setup.py
 ```
 
-**Confidence level: ★★★★☆ (4/5).** The core logic, sorting, filtering, recurrence, and
-exact-time conflict detection are all exercised by passing tests. Docking one star
-because conflict detection only checks exact time matches (not overlapping durations),
-which is an accepted tradeoff documented in `reflection.md`.
-
-## 📐 Smarter Scheduling
-
-The `Scheduler` in `pawpal_system.py` adds four algorithmic features on top of the
-core data model:
-
-| Feature | Method(s) | Notes |
-|---------|-----------|-------|
-| Task sorting | `Scheduler.sort_by_time()` | Sorts all (pet, task) pairs chronologically. Times are zero-padded `HH:MM`, so a string sort is already chronological. |
-| Filtering | `Scheduler.filter_by_pet(name)`, `Scheduler.filter_by_status(completed)` | Narrow the task list to a single pet, or to done / outstanding tasks. |
-| Conflict detection | `Scheduler.detect_conflicts()` | Groups tasks by exact time and returns a warning string for any slot with 2+ tasks (returns messages, never raises). |
-| Recurring tasks | `Task.next_occurrence()`, `Scheduler.mark_task_complete(task)` | Completing a `daily`/`weekly` task spawns the next occurrence via `timedelta` and attaches it to the same pet. |
-
-## ✨ Features
-
-- **Multi-pet task management** — one `Owner` manages many `Pet`s, each with its own tasks.
-- **Task attributes** — description, time (`HH:MM`), frequency (once/daily/weekly), and completion status.
-- **Sorting by time** — `Scheduler.sort_by_time()` shows the day chronologically.
-- **Filtering** — by pet (`filter_by_pet`) or by completion status (`filter_by_status`).
-- **Daily/weekly recurrence** — completing a recurring task auto-creates its next occurrence.
-- **Conflict warnings** — `detect_conflicts()` flags tasks booked at the same time.
-
-## 📸 Demo Walkthrough
-
-**Main UI features (`app.py`)** — the Streamlit app lets a user:
-- Set the owner name.
-- Add a pet (name + species).
-- Schedule a task for any pet (description, time, frequency).
-- View today's schedule as a table, sorted by time, with per-pet and per-status filters.
-- See conflict warnings surfaced at the top when two tasks share a time.
-
-**Example workflow:**
-
-1. Open the app (`streamlit run app.py`) — an `Owner` is created and kept in
-   `st.session_state` so data survives page reruns.
-2. Under **Add a pet**, add `Biscuit` (dog). It appears in "Current pets".
-3. Under **Schedule a task**, add `Morning walk` at `08:00`, frequency `daily`.
-4. Add a second pet `Mochi` (cat) and a task `Morning cuddle` at `08:00`.
-5. In **Today's schedule**, the tasks appear sorted by time, and a ⚠️ warning flags the
-   08:00 conflict between Biscuit and Mochi.
-6. Use the **Filter by pet / status** dropdowns to narrow the view.
-
-**Key `Scheduler` behaviors shown:** chronological sorting, exact-time conflict warnings,
-pet/status filtering, and (via the CLI) daily/weekly recurrence.
-
-**Sample CLI output (`python main.py`):**
+This checks dependencies, indexes the corpus, confirms your key works, and — if the model
+ID in `.env` is wrong — prints the list of models your key *can* reach, which is the
+failure people actually hit.
 
 ```
-Owner: Jordan — 2 pets
+Knowledge base
+  [PASS] 31 passages from 5 documents
+  [PASS] Sample query resolved to puppy_and_kitten_care.md#kitten-feeding (0.44)
+  [PASS] Off-topic query correctly rejected
+```
+
+**Run it:**
+
+```bash
+streamlit run app.py     # the web app
+python demo_ai.py        # scripted walkthrough of all three scenarios
+python evaluate.py       # the evaluation harness
+python -m pytest         # the test suite
+```
+
+Without a key everything still runs, clearly labelled as offline. Force that mode with
+`PAWPAL_PROVIDER=stub`.
+
+---
+
+## Sample interactions
+
+Full transcript: [`docs/sample_run.md`](docs/sample_run.md). Reproduce with
+`PAWPAL_PROVIDER=stub python demo_ai.py`.
+
+> These transcripts were captured on the **offline deterministic provider**, which ignores
+> the owner's stated constraints by design. That is why Example 1's confidence is 0.30 and
+> carries a caveat. With a `GEMINI_API_KEY` set, the same commands produce model-generated
+> plans that respond to the request.
+
+### Example 1 — Plan a day, then approve it
+
+**Input:** two pets, one appointment already booked at 11:00.
+
+```text
+Request: Biscuit is a 9-month-old puppy and Mochi is an adult indoor cat.
+I work 09:00 to 17:00 on weekdays. Plan a realistic daily routine.
+
+  Confidence: 0.30   Repairs: 0   Mode: OFFLINE FALLBACK
+
+  Proposed tasks (awaiting approval):
+    07:15  Morning meal                     Mochi      [daily]
+    07:30  Morning walk                     Biscuit    [daily]
+    08:00  Breakfast                        Biscuit    [daily]
+    09:00  Scoop litter tray                Mochi      [daily]
+    17:30  Evening walk                     Biscuit    [daily]
+    18:30  Dinner                           Biscuit    [daily]
+    19:30  Evening play session             Mochi      [daily]
+    20:00  Evening meal                     Mochi      [daily]
+
+  Caveats:
+    - Generated without a language model, so the owner's specific constraints
+      were not considered.
+
+  Agent trace:
+    [start] Planning for Jordan with 2 pet(s)
+    [retrieve] 3 passage(s) retrieved
+    [model] stub:deterministic-rules-v1 replied in 0ms
+    [validate] 8 task(s) accepted, 0 issue(s)
+    [propose] 8 task(s) proposed for approval (confidence 0.3, repairs 0)
+
+  >>> Human approved. 8 task(s) committed.
 
 Today's Schedule:
-  08:00  Morning walk (Biscuit) [daily] [todo]
-  08:00  Morning cuddle (Mochi) [weekly] [todo]
-  09:30  Refill water (Mochi) [daily] [todo]
-  18:00  Dinner (Biscuit) [daily] [todo]
-
-⚠️  Conflicts:
-  - Conflict at 08:00: Morning walk (Biscuit), Morning cuddle (Mochi)
-
-Biscuit's tasks only:
-  18:00  Dinner
-  08:00  Morning walk
-
-After completing Biscuit's daily 'Morning walk':
-  completed flag: True
-  next occurrence due: 2026-07-13 at 08:00
-
-Outstanding (not completed) tasks:
-  18:00  Dinner (Biscuit)
-  08:00  Morning walk (Biscuit)
-  09:30  Refill water (Mochi)
-  08:00  Morning cuddle (Mochi)
+  07:15  Morning meal (Mochi) [daily] [todo]
+  07:30  Morning walk (Biscuit) [daily] [todo]
+  08:00  Breakfast (Biscuit) [daily] [todo]
+  09:00  Scoop litter tray (Mochi) [daily] [todo]
+  11:00  Vet checkup (Biscuit) [once] [todo]
+  17:30  Evening walk (Biscuit) [daily] [todo]
+  18:30  Dinner (Biscuit) [daily] [todo]
+  19:30  Evening play session (Mochi) [daily] [todo]
+  20:00  Evening meal (Mochi) [daily] [todo]
 ```
 
+Note the plan routed around the pre-existing 11:00 appointment, and that `propose` and
+`commit` are separate events with a human decision between them.
 
+### Example 2 — The self-repair loop
+
+The validator rejecting bad model output and the model correcting it. Produced by
+injecting three scripted responses through the provider interface — a real model will not
+emit exactly the failure you want on demand. Reproduce with the snippet in
+[`ai_interactions.md`](ai_interactions.md).
+
+```text
+[start]    Planning for Jordan with 1 pet(s)
+[retrieve] 3 passage(s) retrieved for query 'Plan a morning walk for Biscuit. dog'
+[model]    scripted:scripted-v1 replied in 1ms
+[validate] 0 task(s) accepted, 1 issue(s)      <- pet "Rex" doesn't exist, time "8am"
+[repair]   Attempt 1 rejected; asking the model to fix 1 issue(s)
+[model]    scripted:scripted-v1 replied in 1ms
+[validate] 0 task(s) accepted, 1 issue(s)      <- 11:00 collides with the vet checkup
+[repair]   Attempt 2 rejected; asking the model to fix 1 issue(s)
+[model]    scripted:scripted-v1 replied in 1ms
+[validate] 1 task(s) accepted, 0 issue(s)
+[propose]  1 task(s) proposed for approval (confidence 0.54, repairs 2)
+
+final: ok=True repairs=2 confidence=0.54 time=07:30
+```
+
+Confidence fell from the model's self-reported 0.90 to 0.54 — two repairs at 20% each,
+plus a discount for citing nothing.
+
+### Example 3 — Guardrails: refusing instead of improvising
+
+```text
+3a. Out-of-domain question
+    Q: How do I fix my car engine?
+
+    A: I don't have guidance on that in my knowledge base, so I'd rather not
+       guess. The knowledge base covers dog and cat routines, puppy and kitten
+       care, senior pets, and medication timing. For anything medical, please
+       ask your vet.
+    Confidence: 0.00
+
+3b. Planning with no pets registered
+    -> No pets registered. Add a pet before asking for a plan.
+
+3c. Empty request
+    -> Empty request. Describe what you want scheduled.
+```
+
+The refusal is retrieval-driven, not a keyword blocklist: nothing cleared the domain gate,
+so there was no grounding, so the agent declines.
+
+---
+
+## Design decisions and trade-offs
+
+**The AI proposes; a human commits.** `plan()` never mutates the schedule — a test asserts
+this. An assistant that silently rewrites a pet's medication schedule is a worse product
+than one that asks. The cost is an extra click.
+
+**REST instead of the official SDK.** `google-genai` requires Python ≥ 3.10 (my default
+`python3` is 3.9.6), and Google's own docs currently disagree about its call signature. The
+documented REST endpoint needs only `requests`, works on any Python 3.9+, and is insulated
+from SDK churn. Cost: I maintain the HTTP and error handling myself.
+
+**TF-IDF instead of embeddings.** Retrieval stays free, offline, deterministic and
+unit-testable, with zero heavy dependencies. The cost is real and measured: lexical
+matching misses paraphrases — *"waking me up at 4am"* fails where *"waking me at night"*
+succeeds. Documented in [`model_card.md`](model_card.md) rather than hidden.
+
+**The fallback is the stub provider, not separate emergency code.** When the API fails, the
+agent degrades to the same deterministic planner the tests use. Emergency paths that only
+run in emergencies are the ones that are broken when you need them.
+
+**Validation feeds back rather than fails.** A rejected plan becomes a correction prompt
+containing the exact validator messages. The repair budget is bounded (default 2), so bad
+output cannot loop forever — and the harness proves it stops (`test_agent_gives_up_after_the_repair_budget`).
+
+**Citations are whitelisted against what was actually retrieved.** The specific RAG failure
+worth preventing is invented sources, which make output *look* better-grounded than it is.
+
+**Zero-padded `HH:MM` is enforced, not requested.** `Scheduler.sort_by_time()` sorts times
+as plain strings, so `"8:00"` would silently sort *after* `"18:00"`. The validator protects
+an invariant the original Module 1–3 code already depended on.
+
+**Confidence is deliberately pessimistic.** The model's self-report is discounted for
+repairs, missing grounding, and degraded mode. It is a comparative signal, not a
+probability.
+
+---
+
+## Testing summary
+
+**61/61 unit tests pass** (`python -m pytest`) — 12 inherited from Modules 1–3, 49 new.
+**25/25 evaluation cases pass** on the offline baseline (`python evaluate.py`), broken down
+as retrieval 12/12, validation 10/10, planning 3/3. Machine-readable results are written to
+[`evaluation/results.md`](evaluation/results.md).
+
+| Suite | Cases | What it proves |
+|---|---|---|
+| Retrieval | 12 | The right document surfaces in the top-3, **and** out-of-domain queries return nothing |
+| Validation | 10 | Each guardrail rejects its specific failure category, checked by issue kind |
+| Planning | 3 | The full loop yields valid times, real pets, and a conflict-free schedule |
+
+**What worked.** Defensive JSON parsing was easier than expected — fences, prose wrappers
+and JSON mode are handled in about thirty lines. The validate/repair loop behaves exactly
+as designed under fault injection, including giving up cleanly when output stays bad.
+
+**What didn't.** Retrieval ranking is the weak point, and it stayed weak. Three phrasings
+of "my cat wakes me at night" produce three different top results, one of which misses the
+correct passage entirely. Separately, my own verb-stemming fix caused a regression — the
+corpus phrase *"a **fixed** daily event"* stems to `fix`, so *"fix my car engine"* began
+retrieving medication guidance — which is why a query-coverage domain gate and permanent
+out-of-domain eval cases now exist.
+
+**What I'd measure next.** The offline fallback scores 25/25, which is a warning rather
+than a win: the planning cases check internal consistency, and fixed routines are
+trivially consistent while ignoring the request entirely. The next honest metric is whether
+the live model's plans *beat that baseline* on relevance to the owner's stated constraints
+— which needs human scoring, not assertions.
+
+---
+
+## Reflection
+
+The most useful thing I learned is that in an AI system, the model is the easy part.
+Wiring up Gemini took an afternoon. What took real work was everything defending against
+it: deciding what "wrong" means precisely enough to check automatically, making failure
+visible instead of plausible, and choosing where a human has to stay in the loop.
+
+The second lesson was that quality has to be measured. My retrieval bug never threw an
+exception — it just quietly returned senior-dog advice for a puppy question. It surfaced
+only because I printed real scores for realistic queries. Building `evaluate.py` early
+changed how I worked: every tuning change afterwards was a hypothesis with a number
+attached, and one of them turned out to be a regression I would otherwise have shipped.
+
+My full responsible-AI reflection — limitations and biases, misuse risks, what surprised me,
+and where my AI assistant helped and where it was confidently wrong — is in
+**[`model_card.md`](model_card.md)**.
+
+---
+
+## Project structure
+
+```
+pawpal_system.py        Logic layer from Modules 1-3 — unchanged
+app.py                  Streamlit UI: manual scheduling + AI planner + grounded Q&A
+main.py                 Original CLI demo of the deterministic scheduler
+demo_ai.py              Three-scenario walkthrough of the AI layer
+check_setup.py          Verifies deps, corpus and model reachability
+evaluate.py             Evaluation harness -> evaluation/results.md
+
+pawpal_ai/
+  config.py             Settings, .env loading, no hard-coded secrets
+  logging_setup.py      Logging + RunTrace (auditable per-run records)
+  retriever.py          TF-IDF retrieval, stemming, domain gate
+  providers.py          LLMProvider interface, Gemini REST client, offline stub
+  schemas.py            Plan parsing and every validation rule
+  agent.py              retrieve -> plan -> validate -> repair -> propose
+
+knowledge_base/         5 Markdown documents, 31 retrievable passages
+diagrams/               architecture.mmd (this system) + UML from Modules 1-3
+evaluation/             eval_cases.json + generated results.md
+docs/sample_run.md      Verbatim reproducible command output
+tests/                  61 tests
+model_card.md           Reflection, limitations, biases, misuse analysis
+ai_interactions.md      Agent reasoning traces + retrieval tuning experiments
+```
