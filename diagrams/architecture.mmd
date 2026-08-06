@@ -1,69 +1,94 @@
 %% PawPal+ — Applied AI System Architecture
-%% Source of truth for the architecture image in assets/architecture.png
-%% Preview/export: https://mermaid.live
+%% Source of truth for assets/architecture.png. Preview/export: https://mermaid.live
+%% Read the diagram as one loop: a request enters at the top, is grounded in
+%% retrieved guidance, drafted by a model, checked by a validator, repaired if
+%% it fails, and then held for human approval before it can touch the schedule.
 
 flowchart TD
 
-    subgraph UI["Presentation Layer — Streamlit (app.py)"]
-        A1["Owner / Pet / Task input forms"]
-        A2["Today's schedule table + filters"]
-        A3["AI assistant panel<br/>natural-language request"]
-        A4["Plan explanation + conflict warnings"]
+    subgraph IN["Interfaces"]
+        UI["Streamlit UI<br/>app.py"]
+        CLI["CLI demo<br/>demo_ai.py"]
+        SETUP["Setup checker<br/>check_setup.py"]
     end
 
-    subgraph STATE["Application Memory"]
-        S1["st.session_state<br/>Owner object survives reruns"]
+    REQ["Owner request<br/>natural language + pet context"]
+
+    subgraph AGENT["Agent — pawpal_ai/agent.py"]
+        RET["1. RETRIEVE<br/>query the knowledge base"]
+        PLAN["2. PLAN<br/>prompt the model for JSON"]
+        VAL["3. VALIDATE<br/>schema, pets, times, conflicts, citations"]
+        REPAIR["4. REPAIR<br/>feed the errors back to the model"]
+        CONF["5. SCORE CONFIDENCE<br/>discount for repairs and missing grounding"]
     end
 
-    subgraph AI["AI Layer"]
-        P1["Prompt Builder<br/>system prompt + serialized schedule"]
-        P2["Claude API Client<br/>Anthropic Messages API"]
-        P3["Response Parser / Validator<br/>structured output to Task objects"]
-        P4["Fallback Handler<br/>rule-based plan if API fails"]
+    subgraph KB["Retrieval — pawpal_ai/retriever.py"]
+        DOCS[("knowledge_base/<br/>5 documents, 31 passages")]
+        INDEX["TF-IDF index<br/>stemming + domain gate"]
     end
 
-    subgraph LOGIC["Logic Layer — pawpal_system.py"]
-        L1["Scheduler<br/>sort_by_time, filter_by_pet,<br/>filter_by_status, detect_conflicts"]
-        L2["Owner"]
-        L3["Pet"]
-        L4["Task<br/>mark_complete, next_occurrence"]
+    subgraph MODEL["Providers — pawpal_ai/providers.py"]
+        GEM["GeminiProvider<br/>REST, retries, typed errors"]
+        STUB["StubProvider<br/>deterministic offline fallback"]
     end
 
-    subgraph TEST["Verification — tests/"]
-        T1["pytest suite<br/>logic + AI output validation"]
+    GATE{"HUMAN APPROVAL<br/>owner reviews plan,<br/>sources and trace"}
+
+    subgraph LOGIC["Logic layer — pawpal_system.py (unchanged)"]
+        SCHED["Scheduler<br/>sort, filter, detect_conflicts"]
+        MODEL_O["Owner → Pet → Task"]
     end
 
-    A1 --> S1
-    A3 --> P1
-    S1 --> L2
-    S1 --> L1
+    subgraph VERIFY["Verification"]
+        TESTS["pytest<br/>61 tests, fakes for failure paths"]
+        EVAL["evaluate.py<br/>25 cases → evaluation/results.md"]
+        TRACE[("logs/traces.jsonl<br/>auditable run history")]
+    end
 
-    L2 --> L3
-    L3 --> L4
-    L1 --> L2
+    UI --> REQ
+    CLI --> REQ
+    REQ --> RET
 
-    L1 --> P1
-    P1 --> P2
-    P2 --> P3
-    P2 -.->|API error / timeout| P4
-    P3 -->|validated tasks| L1
-    P4 --> L1
+    DOCS --> INDEX
+    INDEX -->|top-k passages + citations| RET
+    INDEX -.->|no passage clears the gate| REFUSE["Refuse to answer<br/>rather than improvise"]
 
-    L1 --> A2
-    P3 --> A4
-    L1 --> A4
+    RET -->|grounded context| PLAN
+    PLAN --> GEM
+    GEM -->|"API error, timeout, 429"| STUB
+    GEM -->|JSON| VAL
+    STUB -->|JSON| VAL
 
-    L1 -.-> T1
-    P3 -.-> T1
+    VAL -->|invalid| REPAIR
+    REPAIR -->|corrected prompt, bounded retries| PLAN
+    VAL -->|valid| CONF
+    CONF --> GATE
 
-    classDef ui fill:#e3f2fd,stroke:#1565c0,color:#0d223a
-    classDef ai fill:#f3e5f5,stroke:#6a1b9a,color:#2a0d33
+    SCHED -->|existing times| VAL
+
+    GATE -->|approved| MODEL_O
+    GATE -->|discarded| REQ
+    MODEL_O --> SCHED
+    SCHED --> UI
+
+    SETUP -.->|verifies before use| MODEL
+    SETUP -.-> KB
+    AGENT -.->|every step recorded| TRACE
+    TESTS -.->|assert guardrails| VAL
+    EVAL -.->|measure retrieval + planning| AGENT
+
+    classDef iface fill:#e3f2fd,stroke:#1565c0,color:#0d223a
+    classDef agent fill:#f3e5f5,stroke:#6a1b9a,color:#2a0d33
+    classDef kb fill:#e0f7fa,stroke:#00838f,color:#04262b
+    classDef model fill:#fff3e0,stroke:#ef6c00,color:#3a1d02
     classDef logic fill:#e8f5e9,stroke:#2e7d32,color:#0f2a14
-    classDef state fill:#fff8e1,stroke:#f9a825,color:#3a2c05
-    classDef test fill:#fbe9e7,stroke:#c62828,color:#3a0f0d
+    classDef verify fill:#fbe9e7,stroke:#c62828,color:#3a0f0d
+    classDef human fill:#fffde7,stroke:#f9a825,color:#3a2c05,stroke-width:3px
 
-    class A1,A2,A3,A4 ui
-    class P1,P2,P3,P4 ai
-    class L1,L2,L3,L4 logic
-    class S1 state
-    class T1 test
+    class UI,CLI,SETUP,REQ iface
+    class RET,PLAN,VAL,REPAIR,CONF,REFUSE agent
+    class DOCS,INDEX kb
+    class GEM,STUB model
+    class SCHED,MODEL_O logic
+    class TESTS,EVAL,TRACE verify
+    class GATE human
