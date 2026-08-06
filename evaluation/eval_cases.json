@@ -1,0 +1,221 @@
+{
+  "description": "Predefined cases for evaluate.py. Retrieval cases check that the right document surfaces in the top-k; validation cases check that the guardrails accept good plans and reject bad ones; planning cases run the full agent loop and assert properties of the committed schedule.",
+  "retrieval": [
+    {
+      "id": "R1",
+      "query": "how often should I walk a puppy",
+      "expect_sources": ["puppy_and_kitten_care.md"],
+      "note": "Age-specific exercise limits, not general dog exercise."
+    },
+    {
+      "id": "R2",
+      "query": "what should I feed my kitten",
+      "expect_sources": ["puppy_and_kitten_care.md"]
+    },
+    {
+      "id": "R3",
+      "query": "how often should I brush a long haired cat",
+      "expect_sources": ["cat_care.md"]
+    },
+    {
+      "id": "R4",
+      "query": "my cat keeps waking me up at four in the morning",
+      "expect_sources": ["cat_care.md"],
+      "note": "Requires connecting night waking to evening play, not a literal keyword match."
+    },
+    {
+      "id": "R5",
+      "query": "when should I give arthritis medication",
+      "expect_sources": ["senior_pet_care.md", "medication_and_safety.md"]
+    },
+    {
+      "id": "R6",
+      "query": "is chocolate dangerous for dogs",
+      "expect_sources": ["medication_and_safety.md"]
+    },
+    {
+      "id": "R7",
+      "query": "how long can a three month old puppy hold its bladder",
+      "expect_sources": ["puppy_and_kitten_care.md"]
+    },
+    {
+      "id": "R8",
+      "query": "at what age is a dog considered senior",
+      "expect_sources": ["senior_pet_care.md"]
+    },
+    {
+      "id": "R9",
+      "query": "how many times a day should I feed an adult dog",
+      "expect_sources": ["dog_care.md"]
+    },
+    {
+      "id": "R10",
+      "query": "how often should I scoop the litter tray",
+      "expect_sources": ["cat_care.md"]
+    },
+    {
+      "id": "R11",
+      "query": "how do I fix my car engine",
+      "expect_sources": [],
+      "note": "Out of domain. Must retrieve nothing rather than the least-bad match."
+    },
+    {
+      "id": "R12",
+      "query": "what is the capital of France",
+      "expect_sources": [],
+      "note": "Out of domain."
+    }
+  ],
+  "validation": [
+    {
+      "id": "V1",
+      "name": "well-formed plan is accepted",
+      "known_pets": ["Biscuit"],
+      "should_pass": true,
+      "plan": {
+        "tasks": [
+          {"pet": "Biscuit", "description": "Morning walk", "time": "07:30", "frequency": "daily", "sources": []}
+        ],
+        "confidence": 0.8
+      }
+    },
+    {
+      "id": "V2",
+      "name": "hallucinated pet is rejected",
+      "known_pets": ["Biscuit"],
+      "should_pass": false,
+      "expect_issue": "schema",
+      "plan": {
+        "tasks": [
+          {"pet": "Rex", "description": "Morning walk", "time": "07:30", "frequency": "daily"}
+        ]
+      }
+    },
+    {
+      "id": "V3",
+      "name": "unpadded time is rejected",
+      "known_pets": ["Biscuit"],
+      "should_pass": false,
+      "expect_issue": "schema",
+      "plan": {
+        "tasks": [
+          {"pet": "Biscuit", "description": "Morning walk", "time": "8:00", "frequency": "daily"}
+        ]
+      }
+    },
+    {
+      "id": "V4",
+      "name": "impossible time is rejected",
+      "known_pets": ["Biscuit"],
+      "should_pass": false,
+      "expect_issue": "schema",
+      "plan": {
+        "tasks": [
+          {"pet": "Biscuit", "description": "Morning walk", "time": "25:99", "frequency": "daily"}
+        ]
+      }
+    },
+    {
+      "id": "V5",
+      "name": "invalid frequency is rejected",
+      "known_pets": ["Biscuit"],
+      "should_pass": false,
+      "expect_issue": "schema",
+      "plan": {
+        "tasks": [
+          {"pet": "Biscuit", "description": "Morning walk", "time": "07:30", "frequency": "hourly"}
+        ]
+      }
+    },
+    {
+      "id": "V6",
+      "name": "conflict with existing schedule is rejected",
+      "known_pets": ["Biscuit"],
+      "existing_times": ["11:00"],
+      "should_pass": false,
+      "expect_issue": "conflict",
+      "plan": {
+        "tasks": [
+          {"pet": "Biscuit", "description": "Morning walk", "time": "11:00", "frequency": "daily"}
+        ]
+      }
+    },
+    {
+      "id": "V7",
+      "name": "self-conflict inside one plan is rejected",
+      "known_pets": ["Biscuit"],
+      "should_pass": false,
+      "expect_issue": "conflict",
+      "plan": {
+        "tasks": [
+          {"pet": "Biscuit", "description": "Morning walk", "time": "07:30", "frequency": "daily"},
+          {"pet": "Biscuit", "description": "Breakfast", "time": "07:30", "frequency": "daily"}
+        ]
+      }
+    },
+    {
+      "id": "V8",
+      "name": "invented citation is rejected",
+      "known_pets": ["Biscuit"],
+      "allowed_citations": ["dog_care.md#daily-exercise-needs"],
+      "should_pass": false,
+      "expect_issue": "citation",
+      "plan": {
+        "tasks": [
+          {"pet": "Biscuit", "description": "Morning walk", "time": "07:30", "frequency": "daily",
+           "sources": ["vet_journal_2024.md#exercise"]}
+        ]
+      }
+    },
+    {
+      "id": "V9",
+      "name": "real citation is accepted",
+      "known_pets": ["Biscuit"],
+      "allowed_citations": ["dog_care.md#daily-exercise-needs"],
+      "should_pass": true,
+      "plan": {
+        "tasks": [
+          {"pet": "Biscuit", "description": "Morning walk", "time": "07:30", "frequency": "daily",
+           "sources": ["dog_care.md#daily-exercise-needs"]}
+        ]
+      }
+    },
+    {
+      "id": "V10",
+      "name": "empty task list is rejected",
+      "known_pets": ["Biscuit"],
+      "should_pass": false,
+      "expect_issue": "schema",
+      "plan": {"tasks": []}
+    }
+  ],
+  "planning": [
+    {
+      "id": "P1",
+      "name": "puppy and cat, owner works 9-5",
+      "owner": "Jordan",
+      "pets": [["Biscuit", "dog"], ["Mochi", "cat"]],
+      "existing_tasks": [["Vet checkup", "11:00"]],
+      "request": "Biscuit is a 9-month-old puppy and Mochi is an adult indoor cat. I work 09:00 to 17:00 on weekdays. Plan a realistic daily routine.",
+      "min_tasks": 3
+    },
+    {
+      "id": "P2",
+      "name": "senior dog on daily medication",
+      "owner": "Priya",
+      "pets": [["Rusty", "dog"]],
+      "existing_tasks": [],
+      "request": "Rusty is a 12-year-old dog with arthritis who takes medication once a day. Plan a gentle routine around his stiffness.",
+      "min_tasks": 2
+    },
+    {
+      "id": "P3",
+      "name": "single indoor cat",
+      "owner": "Sam",
+      "pets": [["Luna", "cat"]],
+      "existing_tasks": [],
+      "request": "Luna is an indoor cat who seems bored and wakes me at night. Plan her day.",
+      "min_tasks": 2
+    }
+  ]
+}
