@@ -25,22 +25,31 @@ quoted here were copied from that file and from stdout.
 
 The agent then stops. Committing to the schedule requires a human pressing Approve.
 
-### Trace A — a clean run
+### Trace A — a clean live run
 
-Captured from `python demo_ai.py` (offline provider, two pets, one task already booked
-at 11:00).
+Captured from `python demo_ai.py` against `gemini-3.6-flash`, with two pets and one task
+already booked at 11:00.
 
 ```text
 [start]    Planning for Jordan with 2 pet(s)
 [retrieve] 3 passage(s) retrieved for query 'Biscuit is a 9-month-old puppy and Mochi is an adult indoor '
-[model]    stub:deterministic-rules-v1 replied in 0ms
-[validate] 8 task(s) accepted, 0 issue(s)
-[propose]  8 task(s) proposed for approval (confidence 0.3, repairs 0)
-[commit]   8 task(s) added to the schedule
+[model]    gemini:gemini-3.6-flash replied in 6410ms
+[validate] 6 task(s) accepted, 0 issue(s)
+[propose]  6 task(s) proposed for approval (confidence 0.85, repairs 0)
+[commit]   6 task(s) added to the schedule
 ```
 
 Note the ordering: `propose` and `commit` are separate events, with the human decision
-between them. Confidence is capped at 0.3 because this run used the offline fallback.
+between them.
+
+The same request on the offline provider, for comparison — structurally identical, and
+capped at 0.3 confidence because the fallback ignores the owner's constraints:
+
+```text
+[model]    stub:deterministic-rules-v1 replied in 0ms
+[validate] 8 task(s) accepted, 0 issue(s)
+[propose]  8 task(s) proposed for approval (confidence 0.3, repairs 0)
+```
 
 ### Trace B — the repair loop under fault injection
 
@@ -90,6 +99,64 @@ Your previous plan was rejected by the validator for these reasons:
 Return a corrected plan as JSON in the same schema. Fix every issue listed.
 Do not repeat the rejected values.
 ```
+
+### Trace C — the real failure, found on first contact with the live API
+
+Every offline test passed. The first live run failed three times in a row. Verbatim from
+`logs/traces.jsonl`:
+
+```text
+[start]    Planning for Jordan with 2 pet(s)
+[retrieve] 3 passage(s) retrieved
+[model]    gemini:gemini-3.6-flash replied in 8877ms   (tokens=3039)
+[validate] Unparseable output: No JSON object found in response:
+           '{\n  "tasks": [\n    {\n      "pet": "Biscuit",\n
+             "description": "Morning meal for Biscuit",\n      "time": "07:00",\n   '
+[repair]   Attempt 1 rejected; asking the model to fix 1 issue(s)
+[model]    gemini:gemini-3.6-flash replied in 8573ms   (tokens=3145)
+[validate] Unparseable output: Malformed JSON: Expecting ',' delimiter: line 52 column 6
+[repair]   Attempt 2 rejected; asking the model to fix 1 issue(s)
+[model]    gemini:gemini-3.6-flash replied in 8648ms   (tokens=3114)
+[validate] Unparseable output: Malformed JSON: Expecting ',' delimiter: line 42 column 6
+[repair]   Repair budget exhausted
+[abort]    No valid tasks survived validation.
+```
+
+The JSON was not malformed. Look at the first payload: it is *well-formed and simply stops*.
+The output was truncated.
+
+Probing the API directly explained why:
+
+```text
+finishReason : STOP
+usage        : {"promptTokenCount": 27, "candidatesTokenCount": 481,
+                "thoughtsTokenCount": 856, "totalTokenCount": 1364}
+```
+
+`thoughtsTokenCount: 856`. Gemini 3.x reasons before answering, and those tokens are billed
+against the same `maxOutputTokens` budget as the answer. With the cap at 2048, hidden
+reasoning consumed most of it and the plan was cut off mid-object.
+
+Measuring the options:
+
+| `thinkingConfig` | Result | Thought tokens |
+|---|---|---|
+| omitted | STOP | 752 |
+| `thinkingLevel: low` | STOP | **0** |
+| `thinkingBudget: 0` | **HTTP 400**, invalid argument | — |
+| `thinkingBudget: 256` | STOP | 0 |
+
+Three changes followed. `maxOutputTokens` 2048 → 8192. `thinkingLevel: low`, which also cut
+latency from ~8.8s to ~6.4s — this task is structured extraction from supplied context, not
+open-ended reasoning. And the change that mattered most: detect `finishReason: MAX_TOKENS`
+and surface it as *truncation*, with its own repair instruction ("return a SHORTER plan"),
+so the trace stops accusing the parser of a fault three files away.
+
+`test_agent_treats_truncated_output_as_repairable` locks the behaviour in, and asserts the
+trace contains the words "cut off" rather than a JSON error.
+
+**The transferable lesson:** mocked providers cannot exhaust a token budget, so no amount
+of offline testing would have found this. Some bugs live only at the real boundary.
 
 ### How to regenerate these traces
 

@@ -6,7 +6,7 @@ Reflection and responsible-AI documentation for the PawPal+ applied AI system.
 |---|---|
 | **System** | PawPal+ — a RAG-grounded, self-checking pet-care scheduling agent |
 | **Base project** | PawPal+ (Modules 1–3), a deterministic Streamlit pet-care planner |
-| **Model** | Google Gemini via REST (`PAWPAL_MODEL`, default `gemini-2.0-flash`), swappable |
+| **Model** | Google Gemini via REST (`PAWPAL_MODEL`, default `gemini-3.6-flash`), swappable |
 | **Retrieval** | Local TF-IDF over 5 Markdown documents / 31 passages. No external index |
 | **Fallback** | Deterministic offline planner, used when no key is set or the API fails |
 | **Human oversight** | Required. The agent proposes; a person approves before anything is scheduled |
@@ -133,6 +133,19 @@ question gave three different top results.
 top-k, so an off-topic query got the least-bad match and the model dutifully built an
 answer on it. Returning an empty list had to become a deliberate, tested behaviour.
 
+**Passing every offline test told me almost nothing about the live system.** The first real
+API run failed outright — "No valid tasks survived validation", three attempts, all
+reported as malformed JSON. The JSON was fine. Gemini 3.x spends output tokens on hidden
+reasoning (~850 of my 2048-token budget), so the plan was cut off mid-object. My tests
+could not have caught it: fake providers never run out of tokens.
+
+Two lessons stuck. First, an entire category of failure lives only at the real network
+boundary, and a suite that mocks that boundary is blind to it by construction. Second,
+**the error message pointed at the wrong layer** — I was told "malformed JSON", so I looked
+at the parser, when the fault was a configuration value three files away. The fix was not
+just raising the budget; it was detecting `finishReason: MAX_TOKENS` and reporting
+truncation as truncation, so the next person is not sent to the wrong place.
+
 ---
 
 ## Describe your collaboration with AI during this project
@@ -176,6 +189,12 @@ and slow to volunteer that retrieval quality is an empirical question. What made
 difference was building `evaluate.py` early and re-running it after every change, which is
 a judgement call the tooling did not make for me.
 
+The same pattern produced the bug that broke the first live run. The assistant set
+`maxOutputTokens: 2048` — a reasonable-looking default — without accounting for the fact
+that the model it had just recommended spends output tokens on hidden reasoning. Every
+offline test passed. The system failed on its first contact with the real API, and the
+error it produced ("malformed JSON") pointed at the wrong layer entirely.
+
 A smaller instance: it wrote a dynamic `__import__("pawpal_ai.schemas", fromlist=[...])`
 inside the agent loop where a plain top-level import belonged — working code that would not
 survive review.
@@ -193,11 +212,13 @@ failing case first.
 
 Full numbers in [`evaluation/results.md`](evaluation/results.md) and the README.
 
-- **61/61 automated tests pass** (`python -m pytest`): 12 inherited from Modules 1–3, 49
+- **62/62 automated tests pass** (`python -m pytest`): 12 inherited from Modules 1–3, 50
   covering the AI layer.
-- **25/25 evaluation cases pass** on the offline baseline (`python evaluate.py`):
-  retrieval 12/12, validation 10/10, planning 3/3.
+- **25/25 evaluation cases pass** (`python evaluate.py`) against the live model
+  (mean confidence 0.50) and against the offline baseline (0.36): retrieval 12/12,
+  validation 10/10, planning 3/3.
 - Failure paths are tested by injecting fake providers, because a real model cannot be
-  asked to emit malformed JSON on demand.
+  asked to emit malformed JSON on demand — with the caveat, learned the hard way, that
+  mocked providers cannot reproduce token-budget failures.
 - Known-imperfect and deliberately left visible: retrieval ranking on paraphrased queries
   (Experiment 4 in [`ai_interactions.md`](ai_interactions.md)).
