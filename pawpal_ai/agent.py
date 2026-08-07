@@ -23,6 +23,7 @@ from pawpal_ai.config import Settings, load_settings
 from pawpal_ai.logging_setup import RunTrace, get_logger
 from pawpal_ai.providers import (
     LLMProvider,
+    LLMResponse,
     ProviderError,
     StubProvider,
     build_provider,
@@ -235,20 +236,19 @@ class CarePlanAgent:
         system: str,
         trace: RunTrace,
         json_mode: bool,
-    ) -> Tuple[str, bool]:
-        """Call the provider, degrading to the offline stub on failure.
-
-        Returns (text, degraded).
-        """
+    ) -> LLMResponse:
+        """Call the provider, degrading to the offline stub on failure."""
         try:
             response = self.provider.generate(prompt, system=system, json_mode=json_mode)
             trace.add(
                 "model",
-                f"{response.provider}:{response.model} replied in {response.latency_ms}ms",
+                f"{response.provider}:{response.model} replied in {response.latency_ms}ms"
+                + (" (TRUNCATED)" if response.truncated else ""),
                 tokens=response.token_total,
                 degraded=response.degraded,
+                truncated=response.truncated,
             )
-            return response.text, response.degraded
+            return response
         except ProviderError as exc:
             logger.error("Provider failed (%s): %s", type(exc).__name__, exc)
             trace.add("model", f"Provider failed: {type(exc).__name__}: {exc}")
@@ -257,8 +257,7 @@ class CarePlanAgent:
                 raise  # already degraded; nothing left to fall back to
 
             trace.add("fallback", "Falling back to the offline deterministic planner.")
-            response = StubProvider().generate(prompt, system=system, json_mode=json_mode)
-            return response.text, True
+            return StubProvider().generate(prompt, system=system, json_mode=json_mode)
 
     # --- confidence --------------------------------------------------------
 
@@ -320,7 +319,7 @@ class CarePlanAgent:
 
         for attempt in range(self.settings.max_repair_attempts + 1):
             try:
-                raw, degraded_now = self._call_model(
+                response = self._call_model(
                     prompt, PLANNER_SYSTEM_PROMPT, trace, json_mode=True
                 )
             except ProviderError as exc:
@@ -329,31 +328,45 @@ class CarePlanAgent:
                 trace.persist()
                 return result
 
+            degraded_now = response.degraded
             degraded = degraded or degraded_now
 
             # 3. VALIDATE
-            try:
-                parsed = parse_plan(raw)
-            except PlanParseError as exc:
-                trace.add("validate", f"Unparseable output: {exc}")
+            if response.truncated:
+                # Distinct from malformed JSON: the model was cut off mid-answer,
+                # so the fix is a shorter plan, not a better-formed one.
+                trace.add("validate", "Output hit the token cap and was cut off.")
                 report = ValidationReport()
                 report.issues.append(
-                    ValidationIssue("schema", f"Response was not valid JSON: {exc}")
+                    ValidationIssue(
+                        "schema",
+                        "Your reply was cut off by the output limit before it finished. "
+                        "Return a SHORTER plan with at most 6 tasks and brief reasons.",
+                    )
                 )
             else:
-                # The stub cites nothing, so citation checking would reject it for
-                # the wrong reason; only enforce the whitelist on live output.
-                report = validate_plan(
-                    parsed,
-                    known_pets=known_pets,
-                    existing_times=existing_times,
-                    allowed_citations=None if degraded_now else citations,
-                )
-                trace.add(
-                    "validate",
-                    f"{len(report.tasks)} task(s) accepted, {len(report.issues)} issue(s)",
-                    issues=[str(i) for i in report.issues],
-                )
+                try:
+                    parsed = parse_plan(response.text)
+                except PlanParseError as exc:
+                    trace.add("validate", f"Unparseable output: {exc}")
+                    report = ValidationReport()
+                    report.issues.append(
+                        ValidationIssue("schema", f"Response was not valid JSON: {exc}")
+                    )
+                else:
+                    # The stub cites nothing, so citation checking would reject it
+                    # for the wrong reason; enforce the whitelist on live output only.
+                    report = validate_plan(
+                        parsed,
+                        known_pets=known_pets,
+                        existing_times=existing_times,
+                        allowed_citations=None if degraded_now else citations,
+                    )
+                    trace.add(
+                        "validate",
+                        f"{len(report.tasks)} task(s) accepted, {len(report.issues)} issue(s)",
+                        issues=[str(i) for i in report.issues],
+                    )
 
             if report.is_valid:
                 break
@@ -476,15 +489,18 @@ class CarePlanAgent:
         prompt = f"RETRIEVED GUIDANCE:\n{context}\n\nQUESTION:\n{question}"
 
         try:
-            text, degraded = self._call_model(prompt, ANSWER_SYSTEM_PROMPT, trace, json_mode=False)
+            response = self._call_model(prompt, ANSWER_SYSTEM_PROMPT, trace, json_mode=False)
         except ProviderError as exc:
             result.error = f"Could not answer: {exc}"
             trace.add("abort", result.error)
             trace.persist()
             return result
 
-        result.answer = text
-        result.degraded = degraded
+        result.answer = response.text
+        if response.truncated:
+            result.answer += " [answer truncated by the output limit]"
+        result.degraded = response.degraded
+        degraded = response.degraded
         result.sources = [r.chunk.citation for r in results]
         # Retrieval strength is a reasonable proxy for how well-grounded the answer is.
         best = max(r.score for r in results)

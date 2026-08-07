@@ -62,6 +62,7 @@ class LLMResponse:
     latency_ms: int
     usage: Dict[str, Any] = field(default_factory=dict)
     degraded: bool = False  # True when this came from the fallback, not the live model
+    truncated: bool = False  # True when the model hit the output cap mid-answer
 
     @property
     def token_total(self) -> int:
@@ -110,6 +111,13 @@ class GeminiProvider(LLMProvider):
             # Ask the API itself to guarantee JSON. We still validate the result:
             # a syntactically valid JSON document can still be semantically wrong.
             generation_config["responseMimeType"] = "application/json"
+
+        # Gemini 3.x spends output tokens on hidden reasoning before it answers.
+        # Left unbounded it consumed ~850 tokens per call and truncated the plan.
+        if self.settings.thinking_level:
+            generation_config["thinkingConfig"] = {
+                "thinkingLevel": self.settings.thinking_level
+            }
 
         payload: Dict[str, Any] = {
             "contents": [{"role": "user", "parts": [{"text": prompt}]}],
@@ -194,17 +202,32 @@ class GeminiProvider(LLMProvider):
         candidate = candidates[0]
         parts = (candidate.get("content") or {}).get("parts") or []
         text = "".join(part.get("text", "") for part in parts).strip()
+        finish_reason = candidate.get("finishReason", "unknown")
 
         if not text:
-            reason = candidate.get("finishReason", "unknown")
-            raise ContentBlockedError(f"Empty response (finishReason={reason}).")
+            raise ContentBlockedError(f"Empty response (finishReason={finish_reason}).")
 
         usage = body.get("usageMetadata", {}) or {}
+
+        # Report truncation as truncation. Without this the caller sees a JSON
+        # object with no closing brace and reports "malformed JSON", which sends
+        # you looking for a parser bug instead of an output-budget problem.
+        truncated = finish_reason == "MAX_TOKENS"
+        if truncated:
+            logger.warning(
+                "Response hit the output cap (maxOutputTokens=%d, thoughts=%s). "
+                "The answer is incomplete.",
+                self.settings.max_output_tokens,
+                usage.get("thoughtsTokenCount", "?"),
+            )
+
         logger.info(
-            "gemini call ok: model=%s latency=%dms tokens=%s",
+            "gemini call ok: model=%s latency=%dms tokens=%s thoughts=%s finish=%s",
             self.model,
             latency_ms,
             usage.get("totalTokenCount", "?"),
+            usage.get("thoughtsTokenCount", 0),
+            finish_reason,
         )
         return LLMResponse(
             text=text,
@@ -212,6 +235,7 @@ class GeminiProvider(LLMProvider):
             model=body.get("modelVersion", self.model),
             latency_ms=latency_ms,
             usage=usage,
+            truncated=truncated,
         )
 
     @staticmethod

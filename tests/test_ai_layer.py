@@ -60,6 +60,34 @@ class ExplodingProvider(LLMProvider):
         raise ProviderError("simulated outage")
 
 
+class TruncatingProvider(LLMProvider):
+    """Returns a cut-off reply first, then a good one.
+
+    Reproduces the real failure found against Gemini 3.x: reasoning tokens ate the
+    output budget and the JSON was cut off mid-object.
+    """
+
+    name = "truncating"
+    model = "truncating-v1"
+
+    def __init__(self) -> None:
+        self.calls = 0
+
+    def generate(self, prompt: str, system: str = "", json_mode: bool = False) -> LLMResponse:
+        self.calls += 1
+        if self.calls == 1:
+            return LLMResponse(
+                text='{"tasks": [{"pet": "Biscuit", "description": "Morn',
+                provider=self.name,
+                model=self.model,
+                latency_ms=1,
+                truncated=True,
+            )
+        return LLMResponse(
+            text=valid_plan_json(), provider=self.name, model=self.model, latency_ms=1
+        )
+
+
 def valid_plan_json(time: str = "07:30", pet: str = "Biscuit") -> str:
     return json.dumps(
         {
@@ -383,6 +411,26 @@ def test_agent_avoids_conflicting_with_existing_tasks(settings, owner):
     assert result.ok
     assert result.repairs == 1
     assert result.tasks[0].time == "07:30"
+
+
+def test_agent_treats_truncated_output_as_repairable(settings, owner):
+    """A cut-off reply must be reported as truncation and repaired, not mislabelled.
+
+    Regression test for a bug found only against the live API: Gemini 3.x spends
+    output tokens on hidden reasoning, which overran the cap and cut the JSON off
+    mid-object. The parser reported "malformed JSON", which pointed at the wrong
+    layer entirely.
+    """
+    provider = TruncatingProvider()
+    agent = CarePlanAgent(settings=settings, provider=provider)
+
+    result = agent.plan(owner, "plan a walk")
+
+    assert result.ok
+    assert result.repairs == 1
+    assert provider.calls == 2
+    trace_text = " ".join(result.trace.as_lines())
+    assert "cut off" in trace_text, "the trace must name truncation, not blame the parser"
 
 
 def test_agent_degrades_to_stub_when_provider_fails(settings, owner):

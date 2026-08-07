@@ -54,14 +54,21 @@ class Settings:
     """Resolved runtime configuration for the AI layer."""
 
     provider: str = "gemini"
-    model: str = "gemini-2.0-flash"
+    model: str = "gemini-3.6-flash"
     api_key: Optional[str] = None
 
     # Generation controls. Temperature is deliberately low: this system asks the
     # model for structured schedule data, not prose, so determinism beats flair.
     temperature: float = 0.2
-    max_output_tokens: int = 2048
-    request_timeout: int = 30
+    # Generous, because Gemini 3.x is a thinking model and reasoning tokens are
+    # billed against this same budget. At 2048 the plan itself was being cut off
+    # mid-object after ~850 tokens of thinking, which surfaced as "malformed JSON".
+    max_output_tokens: int = 8192
+    # "low" spends no tokens on visible reasoning. This task is structured data
+    # extraction against supplied context, not open-ended problem solving, so the
+    # thinking budget bought latency (8.8s -> ~3s) rather than quality.
+    thinking_level: str = "low"
+    request_timeout: int = 60
     max_retries: int = 2
 
     # Retrieval controls.
@@ -102,11 +109,12 @@ def load_settings() -> Settings:
 
     return Settings(
         provider=provider,
-        model=_env_str("PAWPAL_MODEL", "gemini-2.0-flash"),
+        model=_env_str("PAWPAL_MODEL", "gemini-3.6-flash"),
         api_key=api_key.strip() if api_key else None,
         temperature=_env_float("PAWPAL_TEMPERATURE", 0.2),
-        max_output_tokens=_env_int("PAWPAL_MAX_TOKENS", 2048),
-        request_timeout=_env_int("PAWPAL_TIMEOUT", 30),
+        max_output_tokens=_env_int("PAWPAL_MAX_TOKENS", 8192),
+        thinking_level=_env_str("PAWPAL_THINKING", "low").lower(),
+        request_timeout=_env_int("PAWPAL_TIMEOUT", 60),
         max_retries=_env_int("PAWPAL_MAX_RETRIES", 2),
         top_k=_env_int("PAWPAL_TOP_K", 3),
         max_repair_attempts=_env_int("PAWPAL_MAX_REPAIRS", 2),
